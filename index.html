@@ -1,0 +1,673 @@
+<!doctype html>
+<html>
+	<head>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+
+<title>django-lifecycle</title>
+		<link rel="stylesheet" href="dist/reset.css">
+		<link rel="stylesheet" href="dist/reveal.css">
+<link rel="stylesheet" href="dist/theme/white.css" id="theme">
+		<!-- Theme used for syntax highlighted code -->
+<link rel="stylesheet" href="plugin/highlight/routeros.min.css" id="highlight-theme"></head>
+	<body>
+		<div class="reveal">
+			<div class="slides">
+<section data-markdown  ><textarea data-template>
+
+
+Enrique Soria
+
+# django-lifecycle
+
+Descubriendo cómo gestionar en Django el ciclo de vida de un modelo, _sin pelos ni señales_
+
+</textarea></section>
+<section data-markdown  data-auto-animate><textarea data-template>
+
+### Nuestro proyecto
+
+Vamos a suponer que estamos creando un blog.
+
+</textarea></section>
+<section data-markdown  ><textarea data-template>
+### Nuestro proyecto
+
+Vamos a suponer que estamos creando un blog.
+
+Nuestro blog tiene publicaciones.
+
+</textarea></section>
+<section data-markdown  ><textarea data-template>
+
+### Nuestro proyecto
+
+```python [4-7]
+from django.db import models
+
+
+class Post(models.Model):
+    title = models.CharField(max_length=32)
+    slug = models.SlugField(max_length=32)
+    body = models.TextField()
+
+    def get_url(self, slug=None):
+        slug = slug or self.slug
+        return reverse("posts", kwargs={"slug": slug})
+```
+
+</textarea></section>
+<section data-markdown  ><textarea data-template>
+
+### Objetivo
+
+Setear el _slug_ de nuestro flamante blog automáticamente.
+
+¿Cómo lo haríais?
+
+Note:
+(no, no vale decir con lifecycle)
+ - Sobreescribiendo el save?
+ - Señales?
+
+</textarea></section>
+<section data-markdown  data-auto-animate><textarea data-template>
+
+#### Sobreescribiendo el `.save()` 
+
+```python [2, 10-12]
+from django.db import models
+from django.utils.text import slugify
+
+
+class Post(models.Model):
+    title = models.CharField(max_length=32)
+    slug = models.SlugField(max_length=32)
+    body = models.TextField()
+
+    def save(self, *args, **kwargs):
+        self.slug = slugify(self.title)
+        super().save(*args, **kwargs)
+```
+
+
+</textarea></section>
+<section data-markdown  ><textarea data-template>
+
+#### Sobreescribiendo el `.save()`
+
+...solamente cuando estamos creando la instancia
+
+```python [11-12]
+from django.db import models
+from django.utils.text import slugify
+
+
+class Post(models.Model):
+    title = models.CharField(max_length=32)
+    slug = models.SlugField(max_length=32)
+    body = models.TextField()
+
+    def save(self, *args, **kwargs):
+        if self.pk is None:
+            self.slug = slugify(self.title)
+        super().save(*args, **kwargs)
+```
+
+
+
+</textarea></section>
+<section data-markdown  ><textarea data-template>
+
+#### Sobreescribiendo el `.save()`
+
+No tiene mucho misterio. Aunque un tiempo después nos enteramos que django tiene una cosa
+llamada... [`signals`](https://docs.djangoproject.com/en/5.0/topics/signals/).
+
+</textarea></section>
+<section data-markdown  data-auto-animate><textarea data-template>
+
+#### Usando señales de Django
+
+```python
+# blog/signals.py
+from django.core.signals import pre_save
+from django.utils.text import slugify
+from .models import Blog
+
+
+@receiver(pre_save, sender=Post)
+def on_post_pre_save_receiver(sender, instance, raw, using, update_fields):
+    if instance.pk is None:
+        instance.slug = slugify(instance.title)
+```
+
+Note:
+Pinta bien, PERO esto hay que ubicarlo fuera del modelo
+
+...y ADEMÁS nos tenemos que acordar de registrar la señal en el `app.ready`
+
+</textarea></section>
+<section data-markdown  ><textarea data-template>
+
+#### Usando señales de Django
+
+```python
+# blog/signals.py
+from django.core.signals import pre_save
+from django.utils.text import slugify
+from .models import Blog
+
+
+@receiver(pre_save, sender=Post)
+def on_post_pre_save_receiver(sender, instance, raw, using, update_fields):
+    if instance.pk is None:
+        instance.slug = slugify(instance.title)
+```
+
+```python
+# blog/app.py
+from django.apps import AppConfig
+
+
+class MyAppConfig(AppConfig):
+    def ready(self):
+        from . import signals
+```
+
+</textarea></section>
+<section data-markdown  ><textarea data-template>
+
+¡Genial, ya hemos aprendido a setear el slug en el momento de creación de una publicación, pero...
+
+</textarea></section>
+<section data-markdown  ><textarea data-template>
+
+![la gente cambia](https://pbs.twimg.com/media/BmQIKItCUAA_yQP.jpg)
+
+...y los títulos también
+
+</textarea></section>
+<section data-markdown  ><textarea data-template>
+
+# Nuevos requerimientos
+
+ - Cambiar el slug cuando el título cambia
+ - Hacer un redirect de la antigua URL a la nueva
+
+</textarea></section>
+<section data-markdown  ><textarea data-template>
+
+### Sobreescribiendo el `.save()`
+
+Cambiar el slug cuando el título cambia
+
+```python [5, 8]
+class Post(models.Model):
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._original_title = self.title
+
+    def save(self, *args, **kwargs):
+        if self.pk is None or self._original_title != self.title:
+            self.slug = slugify(self.title)
+        super().save(*args, **kwargs)
+```
+
+</textarea></section>
+<section data-markdown  ><textarea data-template>
+
+### Sobreescribiendo el `.save()`
+
+Hacer un redirect de la antigua URL a la nueva
+
+```python [12-13]
+class Post(models.Model):
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._original_title = self.title
+        self._original_slug = self.slug
+
+    def save(self, *args, **kwargs):
+        if self.pk is None or self._original_title != self.title:
+            self.slug = slugify(self.title)
+        super().save(*args, **kwargs)
+        if self._original_slug != self.slug:
+            self.create_redirect(old_url=self.get_url(self._original_slug), new_url=self.get_url(self.slug))
+```
+
+</textarea></section>
+<section data-markdown  data-auto-animate><textarea data-template>
+
+### Usando señales de Django
+
+Cambiar el slug cuando el título cambia
+
+```python [4, 6]
+# blog/signals.py
+@receiver(pre_save, sender=Post)
+def on_post_pre_save_receiver(sender, instance, raw, using, update_fields):
+    old_instance = Post.objects.get(pk=instance.pk)
+    
+    if instance.pk is None or old_instance.title != instance.title:
+        instance.slug = slugify(instance.title)
+```
+
+</textarea></section>
+<section data-markdown  ><textarea data-template>
+
+### Usando señales de Django
+
+Cambiar el slug cuando el título cambia
+
+Hacer un redirect de la antigua URL a la nueva
+
+```python [7-13]
+# blog/signals.py
+@receiver(pre_save, sender=Post)
+def on_post_pre_save_receiver(sender, instance, raw, using, update_fields):
+    old_instance = Post.objects.get(pk=instance.pk)
+    
+    if instance.pk is None or old_instance.title != instance.title:
+        instance.slug = slugify(instance.title)
+
+    Post.create_redirect(self.create_redirect(
+        old_instance=instance.get_url(old_instance.slug),
+        new_url=instance.get_url(instance.slug))
+    )
+```
+
+
+</textarea></section>
+<section data-markdown  ><textarea data-template>
+
+### Usando django-lifecycle
+
+Hemos venido a hablar de cierta librería, ¿verdad? 
+
+Vamos a reescribir los antiguos ejemplos usando django-lifecycle:
+
+
+```python [3, 6]
+from django.db import models
+from django.utils.text import slugify
+from django_lifecycle import LifecycleModel
+
+
+class Post(LifecycleModel):
+    title = models.CharField(max_length=32)
+    slug = models.SlugField(max_length=32)
+    body = models.TextField()
+```
+
+</textarea></section>
+<section data-markdown  ><textarea data-template>
+
+### Usando señales de Django
+
+Vamos a crear unas funciones que hagan lo que queremos.
+
+```python
+class Post(LifecycleModel):
+    title = models.CharField(max_length=32)
+    slug = models.SlugField(max_length=32)
+    body = models.TextField()
+
+    def set_slug(self):
+        self.slug = slugify(self.title)
+```
+
+</textarea></section>
+<section data-markdown  ><textarea data-template>
+
+### Usando señales de Django
+
+`django-lifecycle` nos proporciona una utilidad para obtener el valor inicial: `initial_value(field_name)`
+
+```python [9-14]
+class Post(LifecycleModel):
+    title = models.CharField(max_length=32)
+    slug = models.SlugField(max_length=32)
+    body = models.TextField()
+
+    def set_slug(self):
+        self.slug = slugify(self.title)
+
+    def create_redirect(self):
+        Redirect.objects.update_or_create(
+            site=1,
+            old_path=self.get_absolute_url(slug=self.initial_value("slug")),
+            new_path=self.get_absolute_url(slug=self.slug),
+        )
+```
+
+</textarea></section>
+<section data-markdown  data-auto-animate><textarea data-template>
+
+### Usando señales de Django
+
+#### Escoger [en qué momentos](https://rsinger86.github.io/django-lifecycle/hooks_and_conditions/#lifecycle-moments) se quieren realizar estas acciones.
+
+</textarea></section>
+<section data-markdown  ><textarea data-template>
+
+### Usando señales de Django
+
+#### Escoger [en qué momentos](https://rsinger86.github.io/django-lifecycle/hooks_and_conditions/#lifecycle-moments) se quieren realizar estas acciones:
+
+ - BEFORE_SAVE, AFTER_SAVE
+ - BEFORE_CREATE, AFTER_CREATE
+ - BEFORE_UPDATE, AFTER_UPDATE
+ - BEFORE_DELETE, AFTER_DELETE
+
+</textarea></section>
+<section data-markdown  ><textarea data-template>
+
+### Usando señales de Django
+
+####  Escoger [en qué momentos](https://rsinger86.github.io/django-lifecycle/hooks_and_conditions/#lifecycle-moments) se quieren realizar estas acciones:
+
+```python [3, 7]
+class Post(LifecycleModel):
+
+    @hook(BEFORE_SAVE)
+    def set_slug(self):
+        self.slug = slugify(self.title)
+
+    @hook(AFTER_SAVE)
+    def create_redirect(self):
+        Redirect.objects.update_or_create(
+            site=1,
+            old_path=self.get_absolute_url(slug=self.initial_value("slug")),
+            new_path=self.get_absolute_url(slug=self.slug),
+        )
+```
+
+</textarea></section>
+<section data-markdown  data-auto-animate><textarea data-template>
+
+### Usando señales de Django
+
+Aunque no siempre se tienen que ejecutar. 
+
+Hay que especificar [en qué condiciones se ejecutan los hooks](https://rsinger86.github.io/django-lifecycle/hooks_and_conditions/#conditions).
+
+Note:
+Requisitos:
+ - slugify BEFORE_CREATE y cuando cambie el título
+
+</textarea></section>
+<section data-markdown  ><textarea data-template>
+
+### Usando señales de Django
+
+
+Aunque no siempre se tienen que ejecutar. 
+
+Hay que especificar [en qué condiciones se ejecutan los hooks](https://rsinger86.github.io/django-lifecycle/hooks_and_conditions/#conditions).
+
+```python
+WhenFieldHasChanged(field_name, has_changed)
+
+WhenFieldValueIs(field_name, value)
+
+WhenFieldValueIsNot(field_name, value)
+
+WhenFieldValueWas(field_name, value)
+
+WhenFieldValueWasNot(field_name, value)
+
+WhenFieldValueChangesTo(field_name, value)
+````
+
+</textarea></section>
+<section data-markdown  ><textarea data-template>
+
+### Usando señales de Django
+
+Aunque no siempre se tienen que ejecutar. 
+
+Hay que especificar [en qué condiciones se ejecutan los hooks](https://rsinger86.github.io/django-lifecycle/hooks_and_conditions/#conditions).
+
+```python [3-4, 8]
+class Post(LifecycleModel):
+
+    @hook(BEFORE_CREATE)
+    @hook(BEFORE_SAVE, condition=WhenFieldHasChanged("title"))
+    def set_slug(self):
+        self.slug = slugify(self.title)
+
+    @hook(AFTER_SAVE, condition=WhenFieldHasChanged("slug"))
+    def create_redirect(self):
+        Redirect.objects.update_or_create(
+            site=1,
+            old_path=self.get_absolute_url(slug=self.initial_value("slug")),
+            new_path=self.get_absolute_url(self.slug),
+        )
+```
+
+</textarea></section>
+<section data-markdown  ><textarea data-template>
+
+### Usando señales de Django
+
+Aunque no siempre se tienen que ejecutar. 
+
+Hay que especificar [en qué condiciones se ejecutan los hooks](https://rsinger86.github.io/django-lifecycle/hooks_and_conditions/#conditions).
+
+```python [5]
+class Post(LifecycleModel):
+
+    @hook(
+        BEFORE_SAVE,
+        condition=WhenFieldHasChanged("title") | WhenFieldValueIs("slug", value=None)
+    )
+    def set_slug(self):
+        self.slug = slugify(self.title)
+
+    @hook(AFTER_SAVE, condition=WhenFieldHasChanged("slug"))
+    def create_redirect(self):
+        Redirect.objects.update_or_create(
+            site=1,
+            old_path=self.get_absolute_url(slug=self.initial_value("slug")),
+            new_path=self.get_absolute_url(self.slug),
+        )
+```
+
+</textarea></section>
+<section data-markdown  ><textarea data-template>
+
+
+### ¿Cómo nos podemos asegurar que `set_slug` se ejecute antes que el `create_redirect`?
+
+Con el parámetro `priority`:
+
+
+</textarea></section>
+<section data-markdown  ><textarea data-template>
+
+### ¿Cómo nos podemos asegurar que `set_slug` se ejecute antes que el `create_redirect`?
+
+Con el parámetro `priority`:
+
+[comment]: #  (!!! data-auto-animate)
+
+```python [1, 10]
+from django_lifecycle.priority import LOWER_PRIORITY
+
+class Post(LifecycleModel):
+
+    @hook(BEFORE_CREATE)
+    @hook(BEFORE_SAVE, condition=WhenFieldHasChanged("title"))
+    def set_slug(self):
+        self.slug = slugify(self.title)
+
+    @hook(AFTER_SAVE, condition=WhenFieldHasChanged("slug"), priority=LOWER_PRIORITY)
+    def create_redirect(self):
+        Redirect.objects.update_or_create(
+            site=1,
+            old_path=self.get_absolute_url(slug=self.initial_value("slug")),
+            new_path=self.get_absolute_url(self.slug),
+        )
+```
+
+Note: 
+Esta fué mi primera PR a esta librería.
+
+</textarea></section>
+<section data-markdown  ><textarea data-template>
+
+# Nuevos requerimientos
+
+ - Impedir publicaciones sobre IA en nuestro blog
+
+</textarea></section>
+<section data-markdown  ><textarea data-template>
+
+## Custom conditions
+
+Si las condiciones que existen no nos convencen podemos crear nuestras propias condiciones:
+
+```python
+from django_lifecycle.conditions.base import ChainableCondition
+
+
+class WhenFieldContains(ChainableCondition):
+    def __init__(self, field_name, contains_value):
+        self.field_name = field_name
+        self.contains_value = contains_value
+    
+    def __call__(self, instance, update_fields=None):
+        field_value = getattr(instance, self.field_name)
+        return self.contains_value in field_value
+```
+
+</textarea></section>
+<section data-markdown  ><textarea data-template>
+
+Si las condiciones que existen no nos convencen podemos crear nuestras propias condiciones:
+
+```python
+class Post(LifecycleModel):
+    @hook(
+        BEFORE_SAVE, condition=WhenFieldContains("title", "IA") | WhenFieldContains("title", "LLM")
+    )   
+    def avoid_artificial_intelligence_posts(self):
+        raise Exception("¡Los artículos sobre IA están prohibidos en esta casa!")
+```
+
+
+</textarea></section>
+<section data-markdown  ><textarea data-template>
+
+# ¿Cuándo elegir cada opción?
+ - django signals
+ - sobreescribir `.save()`
+ - django-lifecycle
+
+Note:
+Ahora que hemos visto lo maravilloso que es django-lifecycle...
+
+</textarea></section>
+<section data-markdown  ><textarea data-template>
+
+## Django signals
+
+- Modelos de apps de terceros
+- Comportamientos genéricos para muchos modelos
+- Acciones no relacionadas con el ciclo de vida de un modelo (i.e.: [django-allauth](https://docs.allauth.org/en/latest/account/signals.html))
+
+Note: 
+django-allauth:
+ - user_logged_in(request, user)
+ - password_set(request, user)
+ - email_changed(request, user, from_email_address, to_email_address)
+
+
+</textarea></section>
+<section data-markdown  ><textarea data-template>
+
+## Sobreescribir el `.save()`
+
+- Casos de usos muy simples
+
+Note:
+no añadir dependencia externa
+
+</textarea></section>
+<section data-markdown  ><textarea data-template>
+
+## Para todo lo demás... 
+
+
+</textarea></section>
+<section data-markdown  ><textarea data-template>
+
+## Para todo lo demás...
+
+![master-card](https://upload.wikimedia.org/wikipedia/commons/thumb/b/b7/MasterCard_Logo.svg/1920px-MasterCard_Logo.svg.png)
+
+</textarea></section>
+<section data-markdown  ><textarea data-template>
+
+## Para todo lo demás... `django-lifecycle`
+
+</textarea></section>
+<section data-markdown  ><textarea data-template>
+
+### Limitaciones de `django-lifecycle`
+
+Debido a cómo funciona (sobreescribiendo el `.save`), existen [ciertas limitaciones](https://github.com/rsinger86/django-lifecycle/issues/143):
+
+- No se ejecuta cuando realizas acciones `bulk`. (las señales de Django si) 
+  - Deletes en el admin de Django
+  - Deletes en cascada al eliminar un objeto relacionado
+- No se ejecutan con relaciones M2M (se ejecutan en el `through`)
+
+</textarea></section>
+<section data-markdown  ><textarea data-template>
+
+En conclusión, la librería django-lifecycle nos permite, de forma declarativa, crear una serie de acciones asociadas al
+ciclo de vida de un modelo Django.
+
+</textarea></section>
+<section data-markdown  ><textarea data-template>
+
+## Fin
+
+</textarea></section>
+<section data-markdown ><textarea data-template>
+
+# Enrique Soria
+
+- Github: [@EnriqueSoria](https://github.com/EnriqueSoria)
+- Twitter: [@esoria_dev](https://twitter.com/esoria_dev)
+- Mastodon: [@esoria_dev@mastodon.social](https://mastodon.social/@esoria_dev)
+- [Enrique Soria Magraner](https://www.linkedin.com/in/enriquesoriamagraner/) en Linkedin
+</textarea></section>
+			</div>
+		</div>
+
+		<script src="dist/reveal.js"></script>
+		<script src="plugin/notes/notes.js"></script>
+		<script src="plugin/markdown/markdown.js"></script>
+		<script src="plugin/highlight/highlight.js"></script>
+		<script src="plugin/math/math.js"></script>
+		<script>
+			// More info about initialization & config:
+			// - https://revealjs.com/initialization/
+			// - https://revealjs.com/config/
+Reveal.initialize({
+controls : false,
+markdown : {smartypants: true},
+width : 1600,
+height : 900,
+				hash: true,
+				// Learn about plugins: https://revealjs.com/plugins/
+				plugins: [ RevealMarkdown, RevealHighlight, RevealNotes, RevealMath ]
+			});
+		</script>
+	</body>
+</html>
